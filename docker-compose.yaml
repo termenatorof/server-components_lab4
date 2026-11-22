@@ -29,6 +29,7 @@ services:
       SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/expense_db
       SPRING_DATASOURCE_USERNAME: expense_user
       SPRING_DATASOURCE_PASSWORD: expense_password
+      JWT_SECRET_KEY: super-secret-jwt-signing-key-for-kpi-lab4-256bits-minimum
     depends_on:
       db:
         condition: service_healthy
