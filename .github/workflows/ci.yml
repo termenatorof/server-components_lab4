@@ -37,7 +37,12 @@ jobs:
       - name: Make Maven Wrapper executable
         run: chmod +x mvnw
 
-      - name: Code Analysis and Build (Linter/Compiler)
+      - name: Run Integration & Unit Tests with PostgreSQL
+        env:
+          SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5432/expense_db
+          SPRING_DATASOURCE_USERNAME: expense_user
+          SPRING_DATASOURCE_PASSWORD: expense_password
+          JWT_SECRET_KEY: super-secret-jwt-signing-key-for-kpi-lab4-256bits-minimum
         run: ./mvnw clean verify
 
       - name: Build Docker Image
