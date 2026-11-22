@@ -8,6 +8,7 @@ import com.example.server_components.model.User;
 import com.example.server_components.repository.CategoryRepository;
 import com.example.server_components.repository.ExpenseRecordRepository;
 import com.example.server_components.repository.UserRepository;
+import com.example.server_components.security.AuthenticatedUser;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -30,34 +31,56 @@ public class ExpenseService {
         this.recordRepository = recordRepository;
     }
 
+    // --- USERS ---
     @Transactional(readOnly = true)
-    public List<UserResponseDto> getAllUsers() {
+    public List<UserResponseDto> getAllUsers(AuthenticatedUser currentUser) {
+        if (currentUser.isUser()) {
+            throw forbidden("Only auditor or admin can view all users");
+        }
         return userRepository.findAll().stream()
                 .map(UserResponseDto::fromEntity)
                 .toList();
     }
 
     @Transactional(readOnly = true)
-    public UserResponseDto getUserById(Long id) {
+    public UserResponseDto getUserById(Long id, AuthenticatedUser currentUser) {
+        if (currentUser.isUser() && !currentUser.id().equals(id)) {
+            throw new ApiException(HttpStatus.NOT_FOUND, "not_found", "User with id " + id + " not found");
+        }
         return UserResponseDto.fromEntity(findUserEntity(id));
     }
 
     @Transactional
-    public UserResponseDto createUser(UserRequestDto request) {
-        User saved = userRepository.save(new User(request.getName().trim()));
-        return UserResponseDto.fromEntity(saved);
+    public UserResponseDto updateUserRole(Long id, String newRole, AuthenticatedUser currentUser) {
+        if (!currentUser.isAdmin()) {
+            throw forbidden("Only admin can change user roles");
+        }
+        User user = findUserEntity(id);
+        user.setRole(newRole);
+        return UserResponseDto.fromEntity(userRepository.save(user));
     }
 
     @Transactional
-    public void deleteUser(Long id) {
+    public void deleteUser(Long id, AuthenticatedUser currentUser) {
+        if (!currentUser.isAdmin()) {
+            throw forbidden("Only admin can delete users");
+        }
         userRepository.delete(findUserEntity(id));
     }
 
+    // --- CATEGORIES (Глобальні та персональні + RBAC) ---
     @Transactional(readOnly = true)
-    public List<CategoryResponseDto> getCategories(Long userId) {
+    public List<CategoryResponseDto> getCategories(Long userId, AuthenticatedUser currentUser) {
         List<Category> categories;
-        if (userId == null) {
-            categories = categoryRepository.findByUserIsNull();
+        if (currentUser.isUser()) {
+            if (userId != null && !userId.equals(currentUser.id())) {
+                throw new ApiException(HttpStatus.NOT_FOUND, "not_found", "User categories not found");
+            }
+            categories = categoryRepository.findVisibleForUser(currentUser.id());
+        } else if (userId == null) {
+            categories = currentUser.isAdmin()
+                    ? categoryRepository.findAll()
+                    : categoryRepository.findByUserIsNull();
         } else {
             findUserEntity(userId);
             categories = categoryRepository.findVisibleForUser(userId);
@@ -68,40 +91,76 @@ public class ExpenseService {
     }
 
     @Transactional
-    public CategoryResponseDto createCategory(CategoryRequestDto request) {
-        User owner = null;
-        if (request.getUserId() != null) {
-            owner = findUserEntity(request.getUserId());
+    public CategoryResponseDto createGlobalCategory(CategoryRequestDto request, AuthenticatedUser currentUser) {
+        if (!currentUser.isAdmin()) {
+            throw forbidden("Only admin can create global categories");
         }
+        Category saved = categoryRepository.save(new Category(request.getName().trim(), null));
+        return CategoryResponseDto.fromEntity(saved);
+    }
+
+    @Transactional
+    public CategoryResponseDto createPersonalCategory(CategoryRequestDto request, AuthenticatedUser currentUser) {
+        if (currentUser.isAuditor()) {
+            throw forbidden("Auditor has read-only access");
+        }
+
+        User owner;
+        if (currentUser.isUser()) {
+            if (request.getUserId() != null && !request.getUserId().equals(currentUser.id())) {
+                throw forbidden("Regular user can create personal categories only for themselves");
+            }
+            owner = findUserEntity(currentUser.id());
+        } else {
+            // admin
+            owner = request.getUserId() != null ? findUserEntity(request.getUserId()) : null;
+        }
+
         Category saved = categoryRepository.save(new Category(request.getName().trim(), owner));
         return CategoryResponseDto.fromEntity(saved);
     }
 
     @Transactional
-    public void deleteCategory(Long categoryId, Long userId) {
+    public void deleteCategory(Long categoryId, AuthenticatedUser currentUser) {
+        if (currentUser.isAuditor()) {
+            throw forbidden("Auditor has read-only access");
+        }
+
         Category category = findCategoryEntity(categoryId);
-        if (category.getUser() != null) {
-            if (userId == null || !category.getUser().getId().equals(userId)) {
-                throw new ApiException(
-                        HttpStatus.BAD_REQUEST,
-                        "category_access_denied",
-                        "Personal category can only be deleted by its owner (provide matching 'user_id')"
-                );
+        // Глобальна категорія (user_id == null) — видаляє лише admin
+        if (category.getUser() == null) {
+            if (!currentUser.isAdmin()) {
+                throw forbidden("Only admin can delete global categories");
+            }
+        } else {
+            // Персональна категорія — user може видалити лише свою (інакше 404), admin — будь-яку
+            if (currentUser.isUser() && !category.getUser().getId().equals(currentUser.id())) {
+                throw new ApiException(HttpStatus.NOT_FOUND, "not_found",
+                        "Category with id " + categoryId + " not found");
             }
         }
         categoryRepository.delete(category);
     }
 
+    // --- RECORDS ---
     @Transactional
-    public RecordResponseDto createRecord(RecordRequestDto request) {
-        User user = findUserEntity(request.getUserId());
+    public RecordResponseDto createRecord(RecordRequestDto request, AuthenticatedUser currentUser) {
+        if (currentUser.isAuditor()) {
+            throw forbidden("Auditor has read-only access");
+        }
+
+        if (currentUser.isUser() && !request.getUserId().equals(currentUser.id())) {
+            throw forbidden("Regular user can create expense records only for themselves");
+        }
+
+        User targetUser = findUserEntity(request.getUserId());
         Category category = findCategoryEntity(request.getCategoryId());
 
-        if (category.getUser() != null && !category.getUser().getId().equals(user.getId())) {
+        if (category.getUser() != null && !category.getUser().getId().equals(targetUser.getId())) {
             throw new ApiException(
-                    HttpStatus.BAD_REQUEST,
-                    "category_access_denied",
-                    "Personal category belongs to another user and cannot be selected"
+                    HttpStatus.NOT_FOUND,
+                    "not_found",
+                    "Category with id " + request.getCategoryId() + " not found"
             );
         }
 
@@ -110,29 +169,43 @@ public class ExpenseService {
                 : Instant.now().toString();
 
         ExpenseRecord saved = recordRepository.save(
-                new ExpenseRecord(user, category, createdAt, request.getAmount())
+                new ExpenseRecord(targetUser, category, createdAt, request.getAmount())
         );
         return RecordResponseDto.fromEntity(saved);
     }
 
     @Transactional(readOnly = true)
-    public RecordResponseDto getRecordById(Long id) {
+    public RecordResponseDto getRecordById(Long id, AuthenticatedUser currentUser) {
         ExpenseRecord record = recordRepository.findById(id)
                 .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "not_found",
                         "Record with id " + id + " not found"));
+
+        if (currentUser.isUser() && !record.getUser().getId().equals(currentUser.id())) {
+            throw new ApiException(HttpStatus.NOT_FOUND, "not_found",
+                    "Record with id " + id + " not found");
+        }
         return RecordResponseDto.fromEntity(record);
     }
 
     @Transactional
-    public void deleteRecord(Long id) {
+    public void deleteRecord(Long id, AuthenticatedUser currentUser) {
+        if (currentUser.isAuditor()) {
+            throw forbidden("Auditor has read-only access");
+        }
+
         ExpenseRecord record = recordRepository.findById(id)
                 .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "not_found",
                         "Record with id " + id + " not found"));
+
+        if (currentUser.isUser() && !record.getUser().getId().equals(currentUser.id())) {
+            throw new ApiException(HttpStatus.NOT_FOUND, "not_found",
+                    "Record with id " + id + " not found");
+        }
         recordRepository.delete(record);
     }
 
     @Transactional(readOnly = true)
-    public List<RecordResponseDto> filterRecords(Long userId, Long categoryId) {
+    public List<RecordResponseDto> filterRecords(Long userId, Long categoryId, AuthenticatedUser currentUser) {
         if (userId == null && categoryId == null) {
             throw new ApiException(
                     HttpStatus.BAD_REQUEST,
@@ -140,9 +213,22 @@ public class ExpenseService {
                     "At least one query parameter ('user_id' or 'category_id') is required for filtration"
             );
         }
-        return recordRepository.filterRecords(userId, categoryId).stream()
+
+        Long effectiveUserId = userId;
+        if (currentUser.isUser()) {
+            if (userId != null && !userId.equals(currentUser.id())) {
+                throw forbidden("Regular user can filter records only by their own user_id");
+            }
+            effectiveUserId = currentUser.id();
+        }
+
+        return recordRepository.filterRecords(effectiveUserId, categoryId).stream()
                 .map(RecordResponseDto::fromEntity)
                 .toList();
+    }
+
+    private ApiException forbidden(String message) {
+        return new ApiException(HttpStatus.FORBIDDEN, "forbidden", message);
     }
 
     private User findUserEntity(Long id) {

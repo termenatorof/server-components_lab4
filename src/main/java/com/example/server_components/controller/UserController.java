@@ -1,11 +1,12 @@
 package com.example.server_components.controller;
 
-import com.example.server_components.dto.UserRequestDto;
+import com.example.server_components.dto.RoleUpdateRequestDto;
 import com.example.server_components.dto.UserResponseDto;
+import com.example.server_components.security.AuthenticatedUser;
 import com.example.server_components.service.ExpenseService;
 import jakarta.validation.Valid;
-import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -20,23 +21,31 @@ public class UserController {
     }
 
     @GetMapping("/users")
-    public ResponseEntity<List<UserResponseDto>> getAllUsers() {
-        return ResponseEntity.ok(expenseService.getAllUsers());
+    public ResponseEntity<List<UserResponseDto>> getAllUsers(
+            @AuthenticationPrincipal AuthenticatedUser currentUser) {
+        return ResponseEntity.ok(expenseService.getAllUsers(currentUser));
     }
 
     @GetMapping("/user/{user_id}")
-    public ResponseEntity<UserResponseDto> getUserById(@PathVariable("user_id") Long userId) {
-        return ResponseEntity.ok(expenseService.getUserById(userId));
+    public ResponseEntity<UserResponseDto> getUserById(
+            @PathVariable("user_id") Long userId,
+            @AuthenticationPrincipal AuthenticatedUser currentUser) {
+        return ResponseEntity.ok(expenseService.getUserById(userId, currentUser));
     }
 
-    @PostMapping("/user")
-    public ResponseEntity<UserResponseDto> createUser(@Valid @RequestBody UserRequestDto request) {
-        return ResponseEntity.status(HttpStatus.CREATED).body(expenseService.createUser(request));
+    @PatchMapping("/user/{user_id}/role")
+    public ResponseEntity<UserResponseDto> updateUserRole(
+            @PathVariable("user_id") Long userId,
+            @Valid @RequestBody RoleUpdateRequestDto request,
+            @AuthenticationPrincipal AuthenticatedUser currentUser) {
+        return ResponseEntity.ok(expenseService.updateUserRole(userId, request.getRole(), currentUser));
     }
 
     @DeleteMapping("/user/{user_id}")
-    public ResponseEntity<Void> deleteUser(@PathVariable("user_id") Long userId) {
-        expenseService.deleteUser(userId);
+    public ResponseEntity<Void> deleteUser(
+            @PathVariable("user_id") Long userId,
+            @AuthenticationPrincipal AuthenticatedUser currentUser) {
+        expenseService.deleteUser(userId, currentUser);
         return ResponseEntity.noContent().build();
     }
 }
